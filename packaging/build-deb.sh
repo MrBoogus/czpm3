@@ -4,7 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PM3_DIR="${PM3_DIR:-$APP_DIR/../proxmark3}"
-VERSION="${VERSION:-1.4.1}"
+VERSION="${VERSION:-1.4.2}"
 ARCH="${ARCH:-arm64}"
 PKG_NAME="czpm3"
 STAGE_DIR="$APP_DIR/build/deb-stage"

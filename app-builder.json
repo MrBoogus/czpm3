@@ -1,6 +1,6 @@
 {
   "package_name": "czpm3",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "app_name": "CZPM3",
   "bin_name": "czpm3",
   "description": "Proxmark3 RFID/NFC toolkit with native 320x170 framebuffer GUI for CardputerZero (USB, Proxmark5 BLE, RDV4 BlueShark Classic BT)",

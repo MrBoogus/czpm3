@@ -1,6 +1,6 @@
 # CZPM3
 
-![Version](https://img.shields.io/badge/version-1.4.1-blue)
+![Version](https://img.shields.io/badge/version-1.4.2-blue)
 ![Platform](https://img.shields.io/badge/platform-CardputerZero%20arm64-brightgreen)
 ![License](https://img.shields.io/badge/license-GPL--3.0-orange)
 
@@ -32,10 +32,10 @@ Works over **USB serial**, **Proxmark5 BWM BLE (`ble:`)**, **RDV4 BlueShark Clas
 
 ## Quick Install (CardputerZero / Trixie `arm64`)
 
-Download `czpm3_1.4.1_arm64.deb` from the [GitHub Releases](https://github.com/MrBoogus/czpm3/releases) page and install:
+Download `czpm3_1.4.2_arm64.deb` from the [GitHub Releases](https://github.com/MrBoogus/czpm3/releases) page and install:
 
 ```bash
-sudo dpkg -i czpm3_1.4.1_arm64.deb
+sudo dpkg -i czpm3_1.4.2_arm64.deb
 sudo apt-get install -f   # only if any shared dependencies are missing
 ```
 
@@ -98,7 +98,7 @@ Install build dependencies (`build-essential`, `libfreetype-dev`, `libpng-dev`, 
 3. Build the `.deb` package:
    ```bash
    PM3_DIR=/path/to/proxmark3 ./packaging/build-deb.sh
-   sudo dpkg -i dist/czpm3_1.4.1_arm64.deb
+   sudo dpkg -i dist/czpm3_1.4.2_arm64.deb
    ```
 
 ## Credits & License
