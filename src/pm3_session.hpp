@@ -77,6 +77,11 @@ public:
     // Query/toggle Wi-Fi radio via nmcli (for Classic BT BlueShark coexistence on CM0 CYW4343A2)
     static bool is_wifi_enabled();
     static bool set_wifi_enabled(bool enable);
+    void refresh_wifi_state_async();
+    bool start_wifi_toggle(bool enable, bool clear_paused_flag = false);
+    bool is_wifi_busy() const { return wifi_busy_.load(); }
+    bool is_wifi_on_cached() const { return wifi_on_cached_.load(); }
+    std::string wifi_status_msg() const;
 
     // Run a proxmark3 command asynchronously in a persistent interactive forkpty() session.
     bool run_command(const std::string& cmd);
@@ -118,6 +123,8 @@ private:
     std::string config_dir() const;
     std::string config_file_path() const;
     std::string history_file_path() const;
+    std::string wifi_paused_flag_path() const;
+    void mark_wifi_paused_flag(bool paused) const;
     void load_port_config();
     void save_port_config(const std::string& val) const;
     void reader_loop(int master_fd, int pid);
@@ -164,6 +171,10 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> bt_wifi_hint_needed_{false};
     std::atomic<bool> wifi_paused_for_bt_{false};
+    std::atomic<bool> wifi_busy_{false};
+    std::atomic<bool> wifi_on_cached_{true};
+    std::string wifi_status_msg_;
+    std::thread wifi_worker_;
     std::atomic<int> last_exit_code_{0};
     std::atomic<CmdStatus> last_cmd_status_{CmdStatus::NONE};
     std::atomic<uint64_t> version_{1};

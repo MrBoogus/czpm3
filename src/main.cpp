@@ -58,7 +58,7 @@ int render_screenshot(const std::string& mode, const std::string& out_path) {
         session.set_selected_port("ble:AA:BB:CC:11:22:33");
         ui.set_screen_for_demo(cpz::Screen::PORTS);
         if (mode == "ports_bt") {
-            ui.set_ports_demo_focus(8);
+            ui.set_ports_demo_focus(9);
         }
     } else if (mode == "output") {
         session.seed_demo_output("hf search", {

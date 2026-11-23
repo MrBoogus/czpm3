@@ -143,6 +143,7 @@ private:
     int ports_scroll_ = 0;
     bool was_ble_scanning_ = false;
     bool was_bt_pairing_ = false;
+    bool was_wifi_busy_ = false;
     bool wifi_on_ = true;
     bool custom_port_mode_ = false;
     std::string custom_port_input_;

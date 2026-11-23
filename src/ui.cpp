@@ -368,7 +368,7 @@ bool AppUI::has_custom_active_port_row() const {
     return true;
 }
 
-constexpr int kPortsStaticRows = 6;
+constexpr int kPortsStaticRows = 7;
 
 void AppUI::clamp_ports_selection() {
     int extra = has_custom_active_port_row() ? 1 : 0;
@@ -389,7 +389,8 @@ void AppUI::open_ports() {
         session_.refresh_ble_devices_async();
     }
     ble_devices_ = session_.ble_devices_snapshot();
-    wifi_on_ = Pm3Session::is_wifi_enabled();
+    wifi_on_ = session_.is_wifi_on_cached();
+    session_.refresh_wifi_state_async();
     ports_idx_ = 0;
     ports_scroll_ = 0;
     custom_port_mode_ = false;
@@ -474,11 +475,25 @@ void AppUI::handle_events(const std::vector<KeyEvent>& events) {
     bool pair_now = session_.is_bt_pairing();
     if (was_bt_pairing_ && !pair_now) {
         ble_devices_ = session_.ble_devices_snapshot();
-        wifi_on_ = Pm3Session::is_wifi_enabled();
+        wifi_on_ = session_.is_wifi_on_cached();
         clamp_ports_selection();
         show_toast(session_.bt_pair_status_msg());
     }
     was_bt_pairing_ = pair_now;
+
+    bool wifi_now = session_.is_wifi_busy();
+    if (was_wifi_busy_ && !wifi_now) {
+        wifi_on_ = session_.is_wifi_on_cached();
+        std::string wmsg = session_.wifi_status_msg();
+        if (!wmsg.empty()) {
+            show_toast(wmsg);
+        }
+        dirty_ = true;
+    } else if (!wifi_now && screen_ == Screen::PORTS && wifi_on_ != session_.is_wifi_on_cached()) {
+        wifi_on_ = session_.is_wifi_on_cached();
+        dirty_ = true;
+    }
+    was_wifi_busy_ = wifi_now;
 
     if (!ble_now && !pair_now && screen_ == Screen::PORTS) {
         auto snap = session_.ble_devices_snapshot();
@@ -764,29 +779,34 @@ void AppUI::handle_ports(const KeyEvent& ev) {
                 show_toast("Scan/pair already active...");
             }
         } else if (ports_idx_ == 1) {
-            bool target_on = !wifi_on_;
-            bool ok = Pm3Session::set_wifi_enabled(target_on);
-            wifi_on_ = Pm3Session::is_wifi_enabled();
-            if (ok) {
-                show_toast(wifi_on_ ? "Wi-Fi ON" : "Wi-Fi OFF (BlueShark ready)");
+            if (session_.start_wifi_toggle(!wifi_on_, !wifi_on_)) {
+                was_wifi_busy_ = true;
+                show_toast(!wifi_on_ ? "Enabling Wi-Fi..." : "Disabling Wi-Fi...");
             } else {
-                show_toast("Wi-Fi toggle failed");
+                show_toast("Wi-Fi busy...");
             }
         } else if (ports_idx_ == 2) {
+            if (session_.start_wifi_toggle(true, true)) {
+                was_wifi_busy_ = true;
+                show_toast("Restoring Wi-Fi...");
+            } else {
+                show_toast("Wi-Fi busy...");
+            }
+        } else if (ports_idx_ == 3) {
             ports_ = session_.scan_ports();
             show_toast("USB: " + std::to_string(ports_.size()) + " port(s)");
-        } else if (ports_idx_ == 3) {
+        } else if (ports_idx_ == 4) {
             if (session_.is_offline()) {
                 show_toast("Select a port / BT / BLE first");
             } else {
                 launch_command("hw ping", Screen::PORTS);
                 return;
             }
-        } else if (ports_idx_ == 4) {
+        } else if (ports_idx_ == 5) {
             custom_port_mode_ = true;
             std::string cur = session_.selected_port();
             custom_port_input_ = Pm3Session::is_non_serial_port(cur) ? cur : "bt:";
-        } else if (ports_idx_ == 5) {
+        } else if (ports_idx_ == 6) {
             session_.set_selected_port("");
             show_toast("Switched to OFFLINE");
         } else if (ports_idx_ < kPortsStaticRows + serial_cnt) {
@@ -1387,18 +1407,21 @@ void AppUI::draw_ports() {
                      wifi_on_ ? col::AMBER_DIM : col::GREEN_DIM,
                      wifi_on_ ? col::AMBER : col::GREEN);
         } else if (idx == 2) {
+            draw_row(y, sel, IconId::WIFI, col::GREEN,
+                     "Restore Wi-Fi", col::GREEN, "", 0, 0);
+        } else if (idx == 3) {
             draw_row(y, sel, IconId::USB, col::CYAN,
                      "Rescan USB Serial", col::CYAN, "", 0, 0);
-        } else if (idx == 3) {
+        } else if (idx == 4) {
             std::string badge = is_off ? "OFFLINE" : (session_.is_connected() ? "OK" : "PING");
             uint16_t bbg = is_off ? col::SURFACE_ALT : (session_.is_connected() ? col::GREEN_DIM : col::ACCENT_DIM);
             uint16_t bfg = is_off ? col::TEXT_DIM : (session_.is_connected() ? col::GREEN : col::ACCENT);
             draw_row(y, sel, IconId::PING, col::AMBER,
                      "Test / Ping Target", col::CYAN, badge, bbg, bfg);
-        } else if (idx == 4) {
+        } else if (idx == 5) {
             draw_row(y, sel, IconId::TERMINAL, col::ACCENT,
                      "Custom ble:/bt:/tcp:", col::ACCENT, "", 0, 0);
-        } else if (idx == 5) {
+        } else if (idx == 6) {
             draw_row(y, sel, IconId::OFFLINE, col::AMBER,
                      "Offline Mode", col::TEXT,
                      is_off ? "ACTIVE" : "", col::AMBER_DIM, col::AMBER);

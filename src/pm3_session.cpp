@@ -262,9 +262,14 @@ void close_bt_pty(int master_fd, pid_t pid) {
 }  // namespace
 
 Pm3Session::Pm3Session() {
+    if (::access(wifi_paused_flag_path().c_str(), F_OK) == 0) {
+        (void)set_wifi_enabled(true);
+        (void)::unlink(wifi_paused_flag_path().c_str());
+    }
     load_port_config();
     scan_ports();
     refresh_ble_devices_async();
+    refresh_wifi_state_async();
 }
 
 Pm3Session::~Pm3Session() {
@@ -272,6 +277,9 @@ Pm3Session::~Pm3Session() {
     close_session();
     if (ble_worker_.joinable()) {
         ble_worker_.join();
+    }
+    if (wifi_worker_.joinable()) {
+        wifi_worker_.join();
     }
 }
 
@@ -327,6 +335,82 @@ std::string Pm3Session::config_file_path() const {
 
 std::string Pm3Session::history_file_path() const {
     return config_dir() + "/history.txt";
+}
+
+std::string Pm3Session::wifi_paused_flag_path() const {
+    return config_dir() + "/wifi_paused";
+}
+
+void Pm3Session::mark_wifi_paused_flag(bool paused) const {
+    if (paused) {
+        if (ensure_dir_recursive(config_dir())) {
+            std::ofstream ofs(wifi_paused_flag_path(), std::ios::trunc);
+            if (ofs) {
+                ofs << "1\n";
+            }
+        }
+    } else {
+        (void)::unlink(wifi_paused_flag_path().c_str());
+    }
+}
+
+void Pm3Session::refresh_wifi_state_async() {
+    if (wifi_busy_.load()) return;
+    if (wifi_worker_.joinable()) {
+        wifi_worker_.join();
+    }
+    wifi_busy_.store(true);
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        wifi_status_msg_.clear();
+    }
+    wifi_worker_ = std::thread([this]() {
+        bool on = is_wifi_enabled();
+        wifi_on_cached_.store(on);
+        wifi_busy_.store(false);
+        bump_version();
+    });
+}
+
+bool Pm3Session::start_wifi_toggle(bool enable, bool clear_paused_flag) {
+    if (wifi_busy_.load()) return false;
+    if (wifi_worker_.joinable()) {
+        wifi_worker_.join();
+    }
+    wifi_busy_.store(true);
+    {
+        std::lock_guard<std::mutex> lk(mu_);
+        wifi_status_msg_.clear();
+    }
+    wifi_worker_ = std::thread([this, enable, clear_paused_flag]() {
+        bool ok = set_wifi_enabled(enable);
+        if (enable && (clear_paused_flag || ok)) {
+            wifi_paused_for_bt_.store(false);
+            mark_wifi_paused_flag(false);
+        }
+        bool now_on = is_wifi_enabled();
+        wifi_on_cached_.store(now_on);
+        std::string msg;
+        if (clear_paused_flag) {
+            msg = now_on ? "Wi-Fi restored" : "Wi-Fi restore failed";
+        } else if (ok) {
+            msg = now_on ? "Wi-Fi ON" : "Wi-Fi OFF (BlueShark ready)";
+        } else {
+            msg = "Wi-Fi toggle failed";
+        }
+        {
+            std::lock_guard<std::mutex> lk(mu_);
+            wifi_status_msg_ = std::move(msg);
+        }
+        wifi_busy_.store(false);
+        bump_version();
+    });
+    return true;
+}
+
+std::string Pm3Session::wifi_status_msg() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return wifi_status_msg_;
 }
 
 void Pm3Session::load_port_config() {
@@ -656,10 +740,16 @@ bool Pm3Session::start_bt_pair(const std::string& mac, const std::string& pin) {
         bool paired = false;
         std::string status = "Pair failed (" + mac.substr(9) + ")";
 
-        if (is_wifi_enabled() && set_wifi_enabled(false)) {
-            wifi_paused_for_bt_.store(true);
-            for (int i = 0; i < 12 && !stop_bt_worker_.load(); ++i) {
-                ::usleep(100000);
+        if (is_wifi_enabled()) {
+            mark_wifi_paused_flag(true);
+            if (set_wifi_enabled(false)) {
+                wifi_paused_for_bt_.store(true);
+                wifi_on_cached_.store(false);
+                for (int i = 0; i < 12 && !stop_bt_worker_.load(); ++i) {
+                    ::usleep(100000);
+                }
+            } else {
+                mark_wifi_paused_flag(false);
             }
         }
 
@@ -828,7 +918,9 @@ bool Pm3Session::start_bt_pair(const std::string& mac, const std::string& pin) {
             }
         }
         if (!paired && wifi_paused_for_bt_.exchange(false)) {
-            set_wifi_enabled(true);
+            (void)set_wifi_enabled(true);
+            mark_wifi_paused_flag(false);
+            wifi_on_cached_.store(is_wifi_enabled());
         }
 
         {
@@ -947,6 +1039,8 @@ void Pm3Session::close_session(bool restore_wifi) {
     running_.store(false);
     if (restore_wifi && wifi_paused_for_bt_.exchange(false)) {
         (void)set_wifi_enabled(true);
+        mark_wifi_paused_flag(false);
+        wifi_on_cached_.store(true);
     }
     bump_version();
 }
@@ -980,9 +1074,13 @@ bool Pm3Session::run_command_internal(const std::string& cmd, bool log_cmd) {
 
         bool wait_wifi_settle = false;
         if (is_bt && is_wifi_enabled()) {
+            mark_wifi_paused_flag(true);
             if (set_wifi_enabled(false)) {
                 wifi_paused_for_bt_.store(true);
+                wifi_on_cached_.store(false);
                 wait_wifi_settle = true;
+            } else {
+                mark_wifi_paused_flag(false);
             }
         }
 
