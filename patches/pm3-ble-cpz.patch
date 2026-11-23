@@ -1,0 +1,483 @@
+ 
+diff --git a/client/src/comms.c b/client/src/comms.c
+index fa34df5..03b3af9 100644
+--- a/client/src/comms.c
++++ b/client/src/comms.c
+@@ -462,6 +462,7 @@ __attribute__((force_align_arg_pointer))
+         bool is_receiving_raw = __atomic_load_n(&comm_raw_mode, __ATOMIC_SEQ_CST);
+ 
+         if (is_receiving_raw) {
++            uart_set_rx_mode(UART_RX_RAW);
+             uint8_t *bufferData = __atomic_load_n(&comm_raw_data, __ATOMIC_SEQ_CST); // read only
+             size_t bufferLen = __atomic_load_n(&comm_raw_len, __ATOMIC_SEQ_CST); // read only
+             size_t bufferPos = __atomic_load_n(&comm_raw_pos, __ATOMIC_SEQ_CST); // read and write
+@@ -496,6 +497,7 @@ __attribute__((force_align_arg_pointer))
+                 // comm_raw_data == NULL is used in SetCommunicationReceiveMode()
+                 __atomic_store_n(&comm_raw_data, NULL, __ATOMIC_SEQ_CST);
+             }
++            uart_set_rx_mode(UART_RX_IDLE);
+             res = uart_receive(sp, (uint8_t *)&rx_raw.pre, sizeof(PacketResponseNGPreamble), &rxlen);
+ 
+             if ((res == PM3_SUCCESS) && (rxlen == sizeof(PacketResponseNGPreamble))) {
+@@ -516,6 +518,7 @@ __attribute__((force_align_arg_pointer))
+ 
+                     if ((!error) && (length > 0)) { // Get the variable length payload
+ 
++                        uart_set_rx_mode(UART_RX_FRAME_CONT);
+                         res = uart_receive(sp, (uint8_t *)&rx_raw.data, length, &rxlen);
+ 
+                         if ((res != PM3_SUCCESS) || (rxlen != length)) {
+@@ -567,6 +570,7 @@ __attribute__((force_align_arg_pointer))
+                     }
+ 
+                     if (!error) {                        // Get the postamble
++                        uart_set_rx_mode(UART_RX_FRAME_CONT);
+                         res = uart_receive(sp, (uint8_t *)&rx_raw.foopost, sizeof(PacketResponseNGPostamble), &rxlen);
+                         if ((res != PM3_SUCCESS) || (rxlen != sizeof(PacketResponseNGPostamble))) {
+                             PrintAndLogEx(WARNING, "Received packet frame without postamble");
+@@ -603,6 +607,7 @@ __attribute__((force_align_arg_pointer))
+                     PacketResponseOLD rx_old;
+                     memcpy(&rx_old, &rx_raw.pre, sizeof(PacketResponseNGPreamble));
+ 
++                    uart_set_rx_mode(UART_RX_FRAME_CONT);
+                     res = uart_receive(sp, ((uint8_t *)&rx_old) + sizeof(PacketResponseNGPreamble), sizeof(PacketResponseOLD) - sizeof(PacketResponseNGPreamble), &rxlen);
+                     if ((res != PM3_SUCCESS) || (rxlen != sizeof(PacketResponseOLD) - sizeof(PacketResponseNGPreamble))) {
+                         PrintAndLogEx(WARNING, "Received packet OLD frame with payload too short? %d/%zu", rxlen, sizeof(PacketResponseOLD) - sizeof(PacketResponseNGPreamble));
+@@ -650,6 +655,7 @@ __attribute__((force_align_arg_pointer))
+         if (error && (is_receiving_raw == false)) {
+             uint8_t discard[256];
+             uint32_t discarded = 0;
++            uart_set_rx_mode(UART_RX_DRAIN);
+             for (uint8_t round = 0; round < 32; round++) {
+                 uint32_t drained = 0;
+                 if (uart_receive(sp, discard, sizeof(discard), &drained) != PM3_SUCCESS) {
+@@ -660,6 +666,7 @@ __attribute__((force_align_arg_pointer))
+                 }
+                 discarded += drained;
+             }
++            uart_set_rx_mode(UART_RX_IDLE);
+             PrintAndLogEx(WARNING, "Resynchronising, dropped %u byte(s)", discarded);
+         }
+ 
+@@ -924,6 +931,11 @@ int TestProxmark(pm3_device_t *dev) {
+ #else
+     timeout = 1000;
+ #endif
++    bool is_ble_conn = (strncmp(g_conn.serial_port_name, "ble:", 4) == 0);
++    bool is_bt_conn = (strncmp(g_conn.serial_port_name, "bt:", 3) == 0);
++    if ((is_ble_conn || is_bt_conn) && timeout < 5000) {
++        timeout = 5000;
++    }
+ 
+     PacketResponseNG resp;
+     if (WaitForResponseTimeoutW(CMD_PING, &resp, timeout, false) == false) {
+@@ -956,13 +968,13 @@ int TestProxmark(pm3_device_t *dev) {
+     g_conn.em_size = g_pm3_capabilities.em_size;
+ 
+     bool is_tcp_conn = (g_conn.send_via_ip == PM3_TCPv4 || g_conn.send_via_ip == PM3_TCPv6);
+-    bool is_bt_conn = (memcmp(g_conn.serial_port_name, "bt:", 3) == 0);
+     bool is_udp_conn = (g_conn.send_via_ip == PM3_UDPv4 || g_conn.send_via_ip == PM3_UDPv6);
+ 
+-    PrintAndLogEx(SUCCESS, "Communicating with PM3 over %s%s%s%s",
++    PrintAndLogEx(SUCCESS, "Communicating with PM3 over %s%s%s%s%s",
+                   (g_conn.send_via_fpc_usart) ? _GREEN_("FPC UART") : _GREEN_("USB-CDC"),
+                   (is_tcp_conn) ? " over " _GREEN_("TCP") : "",
+                   (is_bt_conn) ? " over " _GREEN_("BT") : "",
++                  (is_ble_conn) ? " over " _GREEN_("BLE") : "",
+                   (is_udp_conn) ? " over " _GREEN_("UDP") : ""
+                  );
+     PrintAndLogEx(SUCCESS, "Max frame size: " _GREEN_("%u") " bytes",
+@@ -1035,6 +1047,12 @@ void CloseProxmark(pm3_device_t *dev) {
+ //           ~ = 12000000 / USART_BAUD_RATE
+ // Let's take 2x (maybe we need more for BT link?)
+ static size_t communication_delay(void) {
++    if (strncmp(g_conn.serial_port_name, "ble:", 4) == 0) {
++        return 2000;
++    }
++    if (strncmp(g_conn.serial_port_name, "bt:", 3) == 0) {
++        return 1500;
++    }
+     // needed also for Windows USB USART??
+     if (g_conn.send_via_fpc_usart) {
+         return 2 * (12000000 / g_conn.uart_speed);
+diff --git a/client/src/uart/ble_posix.c b/client/src/uart/ble_posix.c
+index f684ea2..2a2d759 100644
+--- a/client/src/uart/ble_posix.c
++++ b/client/src/uart/ble_posix.c
+@@ -31,6 +31,7 @@
+ 
+ #include "ui.h"        // PrintAndLogEx
+ #include "pm3_cmd.h"   // PM3_* (only for messaging parity; returns are 0/neg here)
++#include "uart.h"      // uart_rx_mode_t
+ 
+ #define ATT_CID                 4
+ 
+@@ -59,35 +60,54 @@
+ static inline void put16(uint8_t *p, uint16_t v) { p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; }
+ static inline uint16_t get16(const uint8_t *p) { return (uint16_t)(p[0] | (p[1] << 8)); }
+ 
+-// Blocking send of one ATT PDU (one L2CAP SDU).
++static long ble_now_ms(void);
++
++// Blocking send of one ATT PDU (one L2CAP SDU), retrying on EINTR.
+ static int att_write_pdu(int fd, const uint8_t *pdu, size_t len) {
+-    ssize_t n = send(fd, pdu, len, 0);
+-    return (n == (ssize_t)len) ? 0 : -1;
++    for (;;) {
++        ssize_t n = send(fd, pdu, len, 0);
++        if (n < 0 && errno == EINTR) continue;
++        return (n == (ssize_t)len) ? 0 : -1;
++    }
+ }
+ 
+-// Wait up to timeout_ms for one PDU; returns length (>0), 0 on timeout or when
+-// wake_fd (if >= 0) became readable first, -1 error.
++// Wait up to timeout_ms for one PDU (timeout_ms == 0 polls without blocking);
++// returns length (>0), 0 on timeout or when wake_fd (if >= 0) became readable
++// first, -1 on error/disconnect.
+ static int att_read_pdu_wake(int fd, int wake_fd, uint8_t *buf, size_t maxlen, int timeout_ms) {
+-    fd_set rfds;
+-    FD_ZERO(&rfds);
+-    FD_SET(fd, &rfds);
+-    int maxfd = fd;
+-    if (wake_fd >= 0) {
+-        FD_SET(wake_fd, &rfds);
+-        if (wake_fd > maxfd) maxfd = wake_fd;
+-    }
+-    struct timeval tv = { .tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000 };
+-    int r = select(maxfd + 1, &rfds, NULL, NULL, &tv);
+-    if (r < 0) return -1;
+-    if (r == 0) return 0;
+-    if ((wake_fd >= 0) && FD_ISSET(wake_fd, &rfds)) {
+-        uint8_t drain[64];
+-        while (read(wake_fd, drain, sizeof(drain)) > 0) { };
+-        if (FD_ISSET(fd, &rfds) == 0) return 0;    // only a send waiting
++    long deadline = (timeout_ms > 0) ? (ble_now_ms() + timeout_ms) : 0;
++    for (;;) {
++        fd_set rfds;
++        FD_ZERO(&rfds);
++        FD_SET(fd, &rfds);
++        int maxfd = fd;
++        if (wake_fd >= 0) {
++            FD_SET(wake_fd, &rfds);
++            if (wake_fd > maxfd) maxfd = wake_fd;
++        }
++        struct timeval tv = {0, 0};
++        if (timeout_ms > 0) {
++            long rem = deadline - ble_now_ms();
++            if (rem <= 0) return 0;
++            tv.tv_sec = rem / 1000;
++            tv.tv_usec = (rem % 1000) * 1000;
++        }
++        int r = select(maxfd + 1, &rfds, NULL, NULL, &tv);
++        if (r < 0) {
++            if (errno == EINTR) continue;
++            return -1;
++        }
++        if (r == 0) return 0;
++        if ((wake_fd >= 0) && FD_ISSET(wake_fd, &rfds)) {
++            uint8_t drain[64];
++            while (read(wake_fd, drain, sizeof(drain)) > 0) { };
++            if (FD_ISSET(fd, &rfds) == 0) return 0;    // only a send waiting
++        }
++        ssize_t n = recv(fd, buf, maxlen, 0);
++        if (n < 0 && errno == EINTR) continue;
++        if (n <= 0) return -1;
++        return (int)n;
+     }
+-    ssize_t n = recv(fd, buf, maxlen, 0);
+-    if (n <= 0) return -1;
+-    return (int)n;
+ }
+ 
+ static int att_read_pdu(int fd, uint8_t *buf, size_t maxlen, int timeout_ms) {
+@@ -97,6 +117,11 @@ static int att_read_pdu(int fd, uint8_t *buf, size_t maxlen, int timeout_ms) {
+ // Send a request PDU and read PDUs until we get one starting with want_op (or an
+ // ATT error). Notifications that arrive early are ignored here (discovery runs
+ // before we subscribe, so none are expected). Returns rsp length or -1.
++static void att_reply_mtu_req(int fd) {
++    uint8_t mrsp[3] = { ATT_OP_MTU_RSP, (uint8_t)(ATT_PREFERRED_MTU & 0xFF), (uint8_t)((ATT_PREFERRED_MTU >> 8) & 0xFF) };
++    (void)att_write_pdu(fd, mrsp, sizeof(mrsp));
++}
++
+ static int att_txn(int fd, const uint8_t *req, size_t reqlen, uint8_t want_op,
+                    uint8_t *rsp, size_t rspmax) {
+     if (att_write_pdu(fd, req, reqlen) != 0) return -1;
+@@ -104,6 +129,10 @@ static int att_txn(int fd, const uint8_t *req, size_t reqlen, uint8_t want_op,
+         int n = att_read_pdu(fd, rsp, rspmax, 3000);
+         if (n <= 0) return -1;
+         if (rsp[0] == want_op) return n;
++        if (rsp[0] == ATT_OP_MTU_REQ && n >= 3) {
++            att_reply_mtu_req(fd);
++            continue;
++        }
+         if (rsp[0] == ATT_OP_ERROR) return -1;   // caller decides meaning
+         // ignore anything unexpected and keep reading
+     }
+@@ -136,11 +165,8 @@ static int att_find_char(int fd, uint16_t uuid16, uint16_t *out_val_handle) {
+         put16(&req[3], 0xFFFF);
+         put16(&req[5], GATT_CHARACTERISTIC);
+         uint8_t rsp[512];
+-        if (att_write_pdu(fd, req, sizeof(req)) != 0) return -1;
+-        int n = att_read_pdu(fd, rsp, sizeof(rsp), 3000);
+-        if (n <= 0) return -1;
+-        if (rsp[0] == ATT_OP_ERROR) return -1;          // 0x0A = not found -> end
+-        if (rsp[0] != ATT_OP_READ_BY_TYPE_RSP || n < 2) return -1;
++        int n = att_txn(fd, req, sizeof(req), ATT_OP_READ_BY_TYPE_RSP, rsp, sizeof(rsp));
++        if (n < 2) return -1;
+ 
+         uint8_t elen = rsp[1];                            // per-entry length
+         if (elen < 7) return -1;
+@@ -175,10 +201,8 @@ static int att_find_cccd(int fd, uint16_t val_handle, uint16_t *out_cccd) {
+     put16(&req[1], start);
+     put16(&req[3], end);
+     uint8_t rsp[512];
+-    if (att_write_pdu(fd, req, sizeof(req)) != 0) return -1;
+-    int n = att_read_pdu(fd, rsp, sizeof(rsp), 3000);
++    int n = att_txn(fd, req, sizeof(req), ATT_OP_FIND_INFO_RSP, rsp, sizeof(rsp));
+     if (n < 2) return -1;
+-    if (rsp[0] != ATT_OP_FIND_INFO_RSP) return -1;
+     uint8_t fmt = rsp[1];                                  // 1 = 16-bit, 2 = 128-bit
+     if (fmt != 0x01) return -1;                            // CCCD is a 16-bit UUID
+     for (int off = 2; off + 4 <= n; off += 4) {
+@@ -473,8 +497,11 @@ int ble_connect(const char *mac, uint16_t chr_uuid16, ble_conn_t *conn) {
+     }
+ 
+     if (att_find_char(fd, chr_uuid16, &conn->val_handle) != 0) {
+-        PrintAndLogEx(ERR, "BLE: SPP characteristic " _YELLOW_("0x%04X") " not found", chr_uuid16);
+-        goto fail;
++        usleep(150000);
++        if (att_find_char(fd, chr_uuid16, &conn->val_handle) != 0) {
++            PrintAndLogEx(ERR, "BLE: SPP characteristic " _YELLOW_("0x%04X") " not found", chr_uuid16);
++            goto fail;
++        }
+     }
+ 
+     uint16_t cccd = 0;
+@@ -487,6 +514,45 @@ int ble_connect(const char *mac, uint16_t chr_uuid16, ble_conn_t *conn) {
+         goto fail;
+     }
+ 
++    {
++        struct l2cap_conninfo ci;
++        socklen_t clen = sizeof(ci);
++        if (getsockopt(fd, SOL_L2CAP, L2CAP_CONNINFO, &ci, &clen) == 0) {
++            int dev_id = hci_get_route(NULL);
++            if (dev_id >= 0) {
++                int dd = hci_open_dev(dev_id);
++                if (dd >= 0) {
++                    le_connection_update_cp cp;
++                    memset(&cp, 0, sizeof(cp));
++                    cp.handle = htobs(ci.hci_handle);
++                    cp.min_interval = htobs(0x0006);        // 7.50 ms
++                    cp.max_interval = htobs(0x000C);        // 15.00 ms
++                    cp.latency = htobs(0x0000);
++                    cp.supervision_timeout = htobs(0x0258); // 6000 ms
++                    cp.min_ce_length = htobs(0x0000);       // unrestricted
++                    cp.max_ce_length = htobs(0x0000);       // unrestricted
++                    (void)hci_send_cmd(dd, OGF_LE_CTL, OCF_LE_CONN_UPDATE, LE_CONN_UPDATE_CP_SIZE, &cp);
++
++                    struct {
++                        uint16_t handle;
++                        uint8_t  all_phys;
++                        uint8_t  tx_phys;
++                        uint8_t  rx_phys;
++                        uint16_t phy_options;
++                    } __attribute__((packed)) phy_cp;
++                    memset(&phy_cp, 0, sizeof(phy_cp));
++                    phy_cp.handle = htobs(ci.hci_handle);
++                    phy_cp.all_phys = 0x00;
++                    phy_cp.tx_phys = 0x02;                  // LE 2M PHY
++                    phy_cp.rx_phys = 0x02;                  // LE 2M PHY
++                    phy_cp.phy_options = htobs(0x0000);
++                    (void)hci_send_cmd(dd, OGF_LE_CTL, 0x0032, sizeof(phy_cp), &phy_cp);
++                    hci_close_dev(dd);
++                }
++            }
++        }
++    }
++
+     PrintAndLogEx(SUCCESS, "BLE connected, MTU " _GREEN_("%u") ", char handle " _GREEN_("0x%04X"),
+                   conn->mtu, conn->val_handle);
+     return 0;
+@@ -513,7 +579,7 @@ int ble_send(ble_conn_t *conn, const uint8_t *data, size_t len) {
+     return 0;
+ }
+ 
+-int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int timeout_ms, int wake_fd) {
++int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int timeout_ms, int wake_fd, int rx_mode) {
+     if (conn->fd < 0) return -1;
+     size_t got = 0;
+ 
+@@ -528,19 +594,43 @@ int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int
+         if (got == maxlen) { *out_len = got; return 0; }
+     }
+ 
+-    // 2) pull notifications until buffer full or a real timeout.
+-    // NOTE: the client's comms parser requires uart_receive() to return exactly
+-    // the requested length in one call (it checks rxlen != length). A single NG
+-    // frame can span several notifications (payload > ATT_MTU-3), so we must keep
+-    // waiting up to timeout_ms for the in-flight tail, not bail after the first
+-    // burst. Waiting stops as soon as we reach maxlen, so small single-notification
+-    // frames still return immediately.
++    // 2) pull notifications using explicit RX mode semantics so framed packet bodies
++    // never truncate during WiFi/BT coexistence gaps while raw reads never starve.
+     uint8_t pdu[3 + 517];
+     for (;;) {
+-        // wake only while no part of a frame is in hand (same rule as uart_receive)
+-        int n = att_read_pdu_wake(conn->fd, (got == 0) ? wake_fd : -1, pdu, sizeof(pdu), timeout_ms);
++        int wait_ms = timeout_ms;
++        int use_wake = wake_fd;
++        if (rx_mode == UART_RX_RAW) {
++            if (got == 0) {
++                if (wait_ms < 200) wait_ms = 200;
++                if (wait_ms > 500) wait_ms = 500;
++                use_wake = wake_fd;
++            } else {
++                wait_ms = 0;
++                use_wake = -1;
++            }
++        } else if (rx_mode == UART_RX_DRAIN) {
++            wait_ms = (got == 0) ? 150 : 50;
++            use_wake = -1;
++        } else if (rx_mode == UART_RX_FRAME_CONT) {
++            wait_ms = (timeout_ms < 3500) ? 3500 : timeout_ms;
++            use_wake = -1;
++        } else { // UART_RX_IDLE
++            if (got == 0) {
++                wait_ms = timeout_ms;
++                use_wake = wake_fd;
++            } else {
++                wait_ms = (timeout_ms < 3500) ? 3500 : timeout_ms;
++                use_wake = -1;
++            }
++        }
++        int n = att_read_pdu_wake(conn->fd, use_wake, pdu, sizeof(pdu), wait_ms);
+         if (n < 0) { *out_len = got; return (got > 0) ? 0 : -1; }
+         if (n == 0) break;                                  // real timeout / no more
++        if (pdu[0] == ATT_OP_MTU_REQ && n >= 3) {
++            att_reply_mtu_req(conn->fd);
++            continue;
++        }
+         if ((pdu[0] != ATT_OP_HANDLE_NOTIFY && pdu[0] != ATT_OP_HANDLE_INDICATE) || n < 3)
+             continue;                                       // ignore non-notifications
+         if (get16(&pdu[1]) != conn->val_handle) continue;   // not our char
+diff --git a/client/src/uart/ble_posix.h b/client/src/uart/ble_posix.h
+index dc52782..b7264ec 100644
+--- a/client/src/uart/ble_posix.h
++++ b/client/src/uart/ble_posix.h
+@@ -62,7 +62,7 @@ int ble_send(ble_conn_t *conn, const uint8_t *data, size_t len);
+ // timeout_ms for notifications; returns early with 0 bytes when wake_fd (if >= 0)
+ // becomes readable before any byte arrived). *out_len set to bytes copied. Returns 0
+ // on success (including 0 bytes on timeout), negative on error/disconnect.
+-int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int timeout_ms, int wake_fd);
++int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int timeout_ms, int wake_fd, int rx_mode);
+ 
+ void ble_close(ble_conn_t *conn);
+ 
+diff --git a/client/src/uart/uart.h b/client/src/uart/uart.h
+index 902fa4a..6060ae7 100644
+--- a/client/src/uart/uart.h
++++ b/client/src/uart/uart.h
+@@ -91,6 +91,15 @@ int uart_reconfigure_timeouts(uint32_t value);
+  */
+ uint32_t uart_get_timeouts(void);
+ 
++typedef enum {
++    UART_RX_IDLE = 0,        // Waiting for next frame preamble (wakeable when idle)
++    UART_RX_FRAME_CONT = 1,  // Mid-frame body/postamble after preamble received
++    UART_RX_RAW = 2,         // Raw streaming mode (return promptly with any data)
++    UART_RX_DRAIN = 3,       // Resync drain (short timeout, non-blocking tail)
++} uart_rx_mode_t;
++
++void uart_set_rx_mode(uart_rx_mode_t mode);
++
+ /* Specify the outbound address and port for TCP/UDP connections
+  */
+ bool uart_bind(void *socket, const char *bindAddrStr, const char *bindPortStr, bool isBindingIPv6);
+diff --git a/client/src/uart/uart_posix.c b/client/src/uart/uart_posix.c
+index 469557c..93bcc76 100644
+--- a/client/src/uart/uart_posix.c
++++ b/client/src/uart/uart_posix.c
+@@ -75,6 +75,11 @@ struct timeval timeout = {
+ static uint32_t newtimeout_value = 0;
+ static bool newtimeout_pending = false;
+ static uint8_t rx_empty_counter = 0;
++static uart_rx_mode_t g_rx_mode = UART_RX_IDLE;
++
++void uart_set_rx_mode(uart_rx_mode_t mode) {
++    g_rx_mode = mode;
++}
+ 
+ // Self pipe used to interrupt the select() in uart_receive(). Created once, on
+ // first use, and never closed - two descriptors for the life of the process,
+@@ -393,24 +398,36 @@ serial_port uart_open(const char *pcPortName, uint32_t speed, bool slient) {
+             return INVALID_SERIAL_PORT;
+         }
+ 
+-        int sfd = socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM);
+-        if (sfd == -1) {
+-            PrintAndLogEx(ERR, "Error opening Bluetooth socket");
+-            free(addrstr);
+-            free(sp);
+-            return INVALID_SERIAL_PORT;
+-        }
++        timeout.tv_usec = UART_NET_CLIENT_RX_TIMEOUT_MS * 1000;
+ 
+-        if (connect(sfd, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
++        int sfd = -1;
++        for (int attempt = 0; attempt < 3; attempt++) {
++            sfd = socket(AF_BLUETOOTH, SOCK_STREAM, BTPROTO_RFCOMM);
++            if (sfd == -1) {
++                PrintAndLogEx(ERR, "Error opening Bluetooth socket");
++                free(addrstr);
++                free(sp);
++                return INVALID_SERIAL_PORT;
++            }
++            if (connect(sfd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
++                break;
++            }
++            close(sfd);
++            sfd = -1;
++            if (attempt < 2) {
++                msleep(250);
++            }
++        }
++        if (sfd == -1) {
+             if (slient == false) {
+                 PrintAndLogEx(ERR, "Error: cannot connect device " _YELLOW_("%s") " over Bluetooth", addrstr);
+             }
+-            close(sfd);
+             free(addrstr);
+             free(sp);
+             return INVALID_SERIAL_PORT;
+         }
+ 
++        free(addrstr);
+         sp->fd = sfd;
+ 
+         g_conn.send_via_ip = PM3_NONE;
+@@ -648,7 +665,7 @@ int uart_receive(const serial_port sp, uint8_t *pbtRx, uint32_t pszMaxRxLen, uin
+         size_t got = 0;
+         int ms = (int)(timeout.tv_sec * 1000 + timeout.tv_usec / 1000);
+         pthread_once(&wakeup_once, uart_wakeup_create);
+-        int r = ble_recv((ble_conn_t *)spu->ble, pbtRx, pszMaxRxLen, &got, ms, wakeup_pipe[0]);
++        int r = ble_recv((ble_conn_t *)spu->ble, pbtRx, pszMaxRxLen, &got, ms, wakeup_pipe[0], (int)g_rx_mode);
+         *pszRxLen = (uint32_t)got;
+         if (r < 0)
+             return PM3_ENOTTY;
+diff --git a/client/src/uart/uart_win32.c b/client/src/uart/uart_win32.c
+index abcaddd..c051e9d 100644
+--- a/client/src/uart/uart_win32.c
++++ b/client/src/uart/uart_win32.c
+@@ -82,6 +82,10 @@ uint32_t uart_get_timeouts(void) {
+     return newtimeout_value;
+ }
+ 
++void uart_set_rx_mode(uart_rx_mode_t mode) {
++    (void)mode;
++}
++
+ static int uart_reconfigure_timeouts_polling(serial_port sp) {
+     if (newtimeout_pending == false) {
+         return PM3_SUCCESS;

@@ -1,0 +1,41 @@
+{
+  "package_name": "czpm3",
+  "version": "1.4.1",
+  "app_name": "CZPM3",
+  "bin_name": "czpm3",
+  "description": "Proxmark3 RFID/NFC toolkit with native 320x170 framebuffer GUI for CardputerZero (USB, Proxmark5 BLE, RDV4 BlueShark Classic BT)",
+  "store": {
+    "summary": "Proxmark3 RFID/NFC toolkit with native 320x170 GUI",
+    "description": "Native arm64 build of the RfidResearchGroup/proxmark3 client paired with a custom 320x170 Linux framebuffer + keyboard GUI designed for the M5Stack CardputerZero APPLaunch environment. Supports Auto Scan, HF/NFC, LF/RFID, Hardware tuning, Saved Dumps viewer, USB serial, Proxmark5 BWM BLE, RDV4 BlueShark Classic Bluetooth (with automatic Wi-Fi coexistence handling), Offline mode, and full interactive CLI console.",
+    "categories": [
+      "Security",
+      "Hardware & IoT"
+    ],
+    "screenshots": [
+      "screenshots/home.png",
+      "screenshots/ports.png",
+      "screenshots/ports_bt.png",
+      "screenshots/hf_menu.png",
+      "screenshots/output.png",
+      "screenshots/cli_scroll.png"
+    ],
+    "icon": "assets/czpm3.png",
+    "license": "GPL-3.0",
+    "source_repo": "https://github.com/MrBoogus/czpm3",
+    "author": {
+      "github": "MrBoogus",
+      "display_name": "MrBoogus"
+    },
+    "share_code": "CZPM",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": false,
+      "network": false,
+      "additional_hardware": true,
+      "background_service": false,
+      "external_display": false
+    },
+    "locales": {}
+  }
+}

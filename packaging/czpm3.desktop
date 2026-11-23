@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=CZPM3
+Comment=Proxmark3 RFID/NFC toolkit for CardputerZero
+Exec=/usr/share/APPLaunch/bin/czpm3
+Terminal=false
+Icon=share/images/czpm3.png
+Categories=Security;Hardware;
+StartupNotify=false

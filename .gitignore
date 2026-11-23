@@ -1,0 +1,12 @@
+# Build artifacts & packages
+build/
+dist/
+*.o
+*.deb
+*.tar.gz
+*.log
+
+# OS / Editor
+.DS_Store
+*.swp
+*~
