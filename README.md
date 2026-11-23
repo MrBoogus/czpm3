@@ -8,6 +8,8 @@ Native ARM64 port of the **RfidResearchGroup Proxmark3** client paired with a li
 
 Works over **USB serial**, **Proxmark5 BWM BLE (`ble:`)**, **RDV4 BlueShark Classic Bluetooth (`bt:`)**, and **Offline** mode.
 
+> **Authorized use only:** CZPM3 is intended solely for authorized security research, testing, and work on RFID/NFC tags and hardware that you own or have explicit permission to assess.
+
 ## Screenshots
 
 | Home | Device / BT | Classic BT & BLE |
@@ -43,7 +45,21 @@ Restart APPLaunch (or reboot) to show **CZPM3** in the CardputerZero launcher:
 systemctl --user restart APPLaunch.service
 ```
 
-> **Note:** The package sets `cap_net_raw,cap_net_admin+eip` on `/usr/bin/proxmark3` via `postinst` so BLE/BT connections work cleanly without running the GUI as root.
+> **Note:** The package sets `/usr/bin/proxmark3` to group `bluetooth` (`0750`) with `cap_net_raw,cap_net_admin+ep` via `postinst` so members of the `bluetooth` group can use BLE/BT connections without running the GUI as root.
+
+## Wi-Fi Pause & Recovery
+
+CardputerZero's onboard `CYW4343A2` (`btc_mode=0`) shares a single 2.4 GHz radio between Wi-Fi and Classic Bluetooth. To keep `bt:` RFCOMM connections stable:
+
+- **Automatic pause:** Before pairing or connecting over `bt:`, CZPM3 runs `nmcli radio wifi off` and writes a marker file at `~/.config/czpm3/wifi_paused`.
+- **Automatic restore:** Wi-Fi is re-enabled and `~/.config/czpm3/wifi_paused` is removed when switching to BLE/USB/Offline or exiting CZPM3 cleanly.
+- **Crash or manual recovery:**
+  - **Next launch:** At startup, if `~/.config/czpm3/wifi_paused` exists, CZPM3 automatically runs `nmcli radio wifi on` and deletes the marker.
+  - **In the UI:** Select **Restore Wi-Fi** in the **Device / BT** menu.
+  - **From a shell:** Run:
+    ```bash
+    nmcli radio wifi on && rm -f ~/.config/czpm3/wifi_paused
+    ```
 
 ## Controls
 
@@ -66,10 +82,11 @@ systemctl --user restart APPLaunch.service
 
 Install build dependencies (`build-essential`, `libfreetype-dev`, `libpng-dev`, `libbluetooth-dev`, plus standard Proxmark3 build deps):
 
-1. Clone `RfidResearchGroup/proxmark3` and apply [`patches/pm3-ble-cpz.patch`](patches/pm3-ble-cpz.patch):
+1. Clone `RfidResearchGroup/proxmark3`, check out the tested upstream commit (`da929f9`), and apply [`patches/pm3-ble-cpz.patch`](patches/pm3-ble-cpz.patch):
    ```bash
    git clone https://github.com/RfidResearchGroup/proxmark3.git
    cd proxmark3
+   git checkout da929f9
    git apply /path/to/czpm3/patches/pm3-ble-cpz.patch
    make -j4 SKIPQT=1 SKIPGD=1 SKIPPYTHON=1 PREFIX=/usr client
    ```

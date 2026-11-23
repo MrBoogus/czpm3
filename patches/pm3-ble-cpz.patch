@@ -1,4 +1,3 @@
- 
 diff --git a/client/src/comms.c b/client/src/comms.c
 index fa34df5..03b3af9 100644
 --- a/client/src/comms.c
@@ -254,7 +253,7 @@ index f684ea2..2a2d759 100644
      }
  
      uint16_t cccd = 0;
-@@ -487,6 +514,45 @@ int ble_connect(const char *mac, uint16_t chr_uuid16, ble_conn_t *conn) {
+@@ -487,6 +514,58 @@ int ble_connect(const char *mac, uint16_t chr_uuid16, ble_conn_t *conn) {
          goto fail;
      }
  
@@ -277,20 +276,33 @@ index f684ea2..2a2d759 100644
 +                    cp.max_ce_length = htobs(0x0000);       // unrestricted
 +                    (void)hci_send_cmd(dd, OGF_LE_CTL, OCF_LE_CONN_UPDATE, LE_CONN_UPDATE_CP_SIZE, &cp);
 +
-+                    struct {
-+                        uint16_t handle;
-+                        uint8_t  all_phys;
-+                        uint8_t  tx_phys;
-+                        uint8_t  rx_phys;
-+                        uint16_t phy_options;
-+                    } __attribute__((packed)) phy_cp;
-+                    memset(&phy_cp, 0, sizeof(phy_cp));
-+                    phy_cp.handle = htobs(ci.hci_handle);
-+                    phy_cp.all_phys = 0x00;
-+                    phy_cp.tx_phys = 0x02;                  // LE 2M PHY
-+                    phy_cp.rx_phys = 0x02;                  // LE 2M PHY
-+                    phy_cp.phy_options = htobs(0x0000);
-+                    (void)hci_send_cmd(dd, OGF_LE_CTL, 0x0032, sizeof(phy_cp), &phy_cp);
++                    le_read_local_supported_features_rp feat_rp;
++                    memset(&feat_rp, 0, sizeof(feat_rp));
++                    struct hci_request rq;
++                    memset(&rq, 0, sizeof(rq));
++                    rq.ogf = OGF_LE_CTL;
++                    rq.ocf = OCF_LE_READ_LOCAL_SUPPORTED_FEATURES;
++                    rq.event = EVT_CMD_COMPLETE;
++                    rq.rparam = &feat_rp;
++                    rq.rlen = LE_READ_LOCAL_SUPPORTED_FEATURES_RP_SIZE;
++                    if (hci_send_req(dd, &rq, 1000) == 0 &&
++                        feat_rp.status == 0 &&
++                        (feat_rp.features[1] & 0x01)) {
++                        struct {
++                            uint16_t handle;
++                            uint8_t  all_phys;
++                            uint8_t  tx_phys;
++                            uint8_t  rx_phys;
++                            uint16_t phy_options;
++                        } __attribute__((packed)) phy_cp;
++                        memset(&phy_cp, 0, sizeof(phy_cp));
++                        phy_cp.handle = htobs(ci.hci_handle);
++                        phy_cp.all_phys = 0x00;
++                        phy_cp.tx_phys = 0x02;                  // LE 2M PHY
++                        phy_cp.rx_phys = 0x02;                  // LE 2M PHY
++                        phy_cp.phy_options = htobs(0x0000);
++                        (void)hci_send_cmd(dd, OGF_LE_CTL, 0x0032, sizeof(phy_cp), &phy_cp);
++                    }
 +                    hci_close_dev(dd);
 +                }
 +            }
@@ -300,7 +312,7 @@ index f684ea2..2a2d759 100644
      PrintAndLogEx(SUCCESS, "BLE connected, MTU " _GREEN_("%u") ", char handle " _GREEN_("0x%04X"),
                    conn->mtu, conn->val_handle);
      return 0;
-@@ -513,7 +579,7 @@ int ble_send(ble_conn_t *conn, const uint8_t *data, size_t len) {
+@@ -513,7 +592,7 @@ int ble_send(ble_conn_t *conn, const uint8_t *data, size_t len) {
      return 0;
  }
  
@@ -309,7 +321,7 @@ index f684ea2..2a2d759 100644
      if (conn->fd < 0) return -1;
      size_t got = 0;
  
-@@ -528,19 +594,43 @@ int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int
+@@ -528,19 +607,43 @@ int ble_recv(ble_conn_t *conn, uint8_t *buf, size_t maxlen, size_t *out_len, int
          if (got == maxlen) { *out_len = got; return 0; }
      }
  
