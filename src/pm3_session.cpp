@@ -10,6 +10,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <fstream>
 #include <map>
 #include <poll.h>
@@ -24,6 +25,71 @@
 namespace cpz {
 
 namespace {
+
+struct ChildEnv {
+    std::vector<std::string> storage;
+    std::vector<char*> ptrs;
+
+    void build(const std::vector<std::pair<std::string, std::string>>& overrides) {
+        storage.clear();
+        ptrs.clear();
+        std::vector<bool> applied(overrides.size(), false);
+        if (::environ) {
+            for (char** p = ::environ; *p; ++p) {
+                std::string entry(*p);
+                auto eq = entry.find('=');
+                std::string key = (eq == std::string::npos) ? entry : entry.substr(0, eq);
+                bool replaced = false;
+                for (size_t i = 0; i < overrides.size(); ++i) {
+                    if (key == overrides[i].first) {
+                        storage.push_back(overrides[i].first + "=" + overrides[i].second);
+                        applied[i] = true;
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) {
+                    storage.push_back(std::move(entry));
+                }
+            }
+        }
+        for (size_t i = 0; i < overrides.size(); ++i) {
+            if (!applied[i]) {
+                storage.push_back(overrides[i].first + "=" + overrides[i].second);
+            }
+        }
+        ptrs.reserve(storage.size() + 1);
+        for (auto& s : storage) {
+            ptrs.push_back(const_cast<char*>(s.c_str()));
+        }
+        ptrs.push_back(nullptr);
+    }
+
+    char* const* data() const { return ptrs.data(); }
+};
+
+std::string resolve_executable_path(const std::string& prog) {
+    if (prog.empty()) return {};
+    if (prog.find('/') != std::string::npos) {
+        return ::access(prog.c_str(), X_OK) == 0 ? prog : std::string{};
+    }
+    const char* path_env = std::getenv("PATH");
+    std::string search = (path_env && *path_env) ? std::string(path_env) : "/usr/local/bin:/usr/bin:/bin";
+    size_t start = 0;
+    while (start <= search.size()) {
+        size_t sep = search.find(':', start);
+        std::string dir = (sep == std::string::npos) ? search.substr(start) : search.substr(start, sep - start);
+        if (!dir.empty()) {
+            std::string cand = dir + "/" + prog;
+            if (::access(cand.c_str(), X_OK) == 0) {
+                return cand;
+            }
+        }
+        if (sep == std::string::npos) break;
+        start = sep + 1;
+    }
+    return prog;
+}
 
 std::string read_trimmed_file(const std::string& path) {
     std::ifstream ifs(path);
@@ -118,95 +184,191 @@ bool write_all(int fd, const char* data, size_t len) {
     return true;
 }
 
-std::string run_cmd_args(const std::vector<const char*>& argv, int* exit_code = nullptr) {
-    if (argv.empty() || !argv[0]) {
-        if (exit_code) *exit_code = -1;
-        return {};
+std::string run_pipe_cmd(const std::vector<const char*>& argv,
+                         const std::string* stdin_data,
+                         int timeout_ms,
+                         int* exit_code = nullptr) {
+    if (exit_code) *exit_code = -1;
+    if (argv.empty() || !argv[0]) return {};
+
+    std::string exe = resolve_executable_path(argv[0]);
+    if (exe.empty()) return {};
+
+    std::vector<std::string> arg_storage;
+    arg_storage.reserve(argv.size());
+    arg_storage.push_back(exe);
+    for (size_t i = 1; i < argv.size() && argv[i] != nullptr; ++i) {
+        arg_storage.emplace_back(argv[i]);
     }
+    std::vector<char*> c_argv;
+    c_argv.reserve(arg_storage.size() + 1);
+    for (auto& s : arg_storage) {
+        c_argv.push_back(const_cast<char*>(s.c_str()));
+    }
+    c_argv.push_back(nullptr);
+
+    ChildEnv env;
+    env.build({{"NO_COLOR", "1"}, {"TERM", "dumb"}});
+
+    int in_pipe[2]{-1, -1};
     int out_pipe[2]{-1, -1};
-    if (::pipe(out_pipe) != 0) {
-        if (exit_code) *exit_code = -1;
+    if (stdin_data && ::pipe2(in_pipe, O_CLOEXEC) != 0) {
         return {};
     }
+    if (::pipe2(out_pipe, O_CLOEXEC) != 0) {
+        if (in_pipe[0] >= 0) ::close(in_pipe[0]);
+        if (in_pipe[1] >= 0) ::close(in_pipe[1]);
+        return {};
+    }
+
     pid_t pid = ::fork();
     if (pid == 0) {
+        if (in_pipe[0] >= 0) {
+            ::dup2(in_pipe[0], STDIN_FILENO);
+            ::close(in_pipe[0]);
+            ::close(in_pipe[1]);
+        }
         ::dup2(out_pipe[1], STDOUT_FILENO);
         ::dup2(out_pipe[1], STDERR_FILENO);
         ::close(out_pipe[0]);
         ::close(out_pipe[1]);
-        ::setenv("NO_COLOR", "1", 1);
-        ::setenv("TERM", "dumb", 1);
-        ::execvp(argv[0], const_cast<char* const*>(argv.data()));
+        ::execve(exe.c_str(), c_argv.data(), env.data());
         ::_exit(127);
     }
+
+    if (in_pipe[0] >= 0) ::close(in_pipe[0]);
     ::close(out_pipe[1]);
-    std::string out;
-    if (pid > 0) {
-        char buf[2048];
-        while (true) {
-            ssize_t n = ::read(out_pipe[0], buf, sizeof(buf));
-            if (n > 0) out.append(buf, static_cast<size_t>(n));
-            else if (n < 0 && errno == EINTR) continue;
-            else break;
-        }
+
+    if (pid < 0) {
+        if (in_pipe[1] >= 0) ::close(in_pipe[1]);
         ::close(out_pipe[0]);
-        int st = 0;
-        ::waitpid(pid, &st, 0);
+        return {};
+    }
+
+    int out_fl = ::fcntl(out_pipe[0], F_GETFL, 0);
+    if (out_fl >= 0) ::fcntl(out_pipe[0], F_SETFL, out_fl | O_NONBLOCK);
+    if (in_pipe[1] >= 0) {
+        int in_fl = ::fcntl(in_pipe[1], F_GETFL, 0);
+        if (in_fl >= 0) ::fcntl(in_pipe[1], F_SETFL, in_fl | O_NONBLOCK);
+        if (stdin_data->empty()) {
+            ::close(in_pipe[1]);
+            in_pipe[1] = -1;
+        }
+    }
+
+    std::string out;
+    size_t in_sent = 0;
+    bool timed_out = false;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    char buf[2048];
+
+    while (out_pipe[0] >= 0) {
+        auto rem = std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()).count();
+        if (rem <= 0) {
+            timed_out = true;
+            break;
+        }
+
+        struct pollfd pfds[2]{};
+        nfds_t nfds = 0;
+        int out_idx = -1;
+        int in_idx = -1;
+        if (out_pipe[0] >= 0) {
+            out_idx = static_cast<int>(nfds);
+            pfds[nfds++] = {out_pipe[0], POLLIN, 0};
+        }
+        if (in_pipe[1] >= 0) {
+            in_idx = static_cast<int>(nfds);
+            pfds[nfds++] = {in_pipe[1], POLLOUT, 0};
+        }
+
+        int r = ::poll(pfds, nfds, static_cast<int>(rem));
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (r == 0) {
+            timed_out = true;
+            break;
+        }
+
+        if (in_idx >= 0 && (pfds[in_idx].revents & (POLLOUT | POLLERR | POLLHUP))) {
+            if (pfds[in_idx].revents & (POLLERR | POLLHUP)) {
+                ::close(in_pipe[1]);
+                in_pipe[1] = -1;
+            } else {
+                ssize_t w = ::write(in_pipe[1], stdin_data->data() + in_sent,
+                                    stdin_data->size() - in_sent);
+                if (w > 0) {
+                    in_sent += static_cast<size_t>(w);
+                    if (in_sent >= stdin_data->size()) {
+                        ::close(in_pipe[1]);
+                        in_pipe[1] = -1;
+                    }
+                } else if (w < 0 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    ::close(in_pipe[1]);
+                    in_pipe[1] = -1;
+                }
+            }
+        }
+
+        if (out_idx >= 0 && (pfds[out_idx].revents & (POLLIN | POLLHUP | POLLERR))) {
+            while (true) {
+                ssize_t n = ::read(out_pipe[0], buf, sizeof(buf));
+                if (n > 0) {
+                    out.append(buf, static_cast<size_t>(n));
+                } else if (n == 0) {
+                    ::close(out_pipe[0]);
+                    out_pipe[0] = -1;
+                    break;
+                } else if (errno == EINTR) {
+                    continue;
+                } else if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    break;
+                } else {
+                    ::close(out_pipe[0]);
+                    out_pipe[0] = -1;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (in_pipe[1] >= 0) ::close(in_pipe[1]);
+    if (out_pipe[0] >= 0) ::close(out_pipe[0]);
+
+    int st = 0;
+    if (timed_out) {
+        ::kill(pid, SIGTERM);
+        bool reaped = false;
+        for (int i = 0; i < 4; ++i) {
+            if (::waitpid(pid, &st, WNOHANG) > 0) {
+                reaped = true;
+                break;
+            }
+            ::usleep(35000);
+        }
+        if (!reaped) {
+            ::kill(pid, SIGKILL);
+            ::waitpid(pid, &st, 0);
+        }
+        if (exit_code) *exit_code = -1;
+    } else if (::waitpid(pid, &st, 0) > 0) {
         if (exit_code) {
             *exit_code = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
         }
-    } else {
-        ::close(out_pipe[0]);
-        if (exit_code) *exit_code = -1;
     }
     return out;
 }
 
-std::string run_bluetoothctl_batch(const std::string& cmds) {
-    int in_pipe[2]{-1, -1};
-    int out_pipe[2]{-1, -1};
-    if (::pipe(in_pipe) != 0) return {};
-    if (::pipe(out_pipe) != 0) {
-        ::close(in_pipe[0]);
-        ::close(in_pipe[1]);
-        return {};
-    }
-    pid_t pid = ::fork();
-    if (pid == 0) {
-        ::dup2(in_pipe[0], STDIN_FILENO);
-        ::dup2(out_pipe[1], STDOUT_FILENO);
-        ::dup2(out_pipe[1], STDERR_FILENO);
-        ::close(in_pipe[0]);
-        ::close(in_pipe[1]);
-        ::close(out_pipe[0]);
-        ::close(out_pipe[1]);
-        ::setenv("NO_COLOR", "1", 1);
-        ::setenv("TERM", "dumb", 1);
-        const char* argv[] = {"bluetoothctl", nullptr};
-        ::execvp("bluetoothctl", const_cast<char* const*>(argv));
-        ::_exit(127);
-    }
-    ::close(in_pipe[0]);
-    ::close(out_pipe[1]);
-    std::string out;
-    if (pid > 0) {
-        (void)write_all(in_pipe[1], cmds.data(), cmds.size());
-        ::close(in_pipe[1]);
-        char buf[2048];
-        while (true) {
-            ssize_t n = ::read(out_pipe[0], buf, sizeof(buf));
-            if (n > 0) out.append(buf, static_cast<size_t>(n));
-            else if (n < 0 && errno == EINTR) continue;
-            else break;
-        }
-        ::close(out_pipe[0]);
-        int st = 0;
-        ::waitpid(pid, &st, 0);
-    } else {
-        ::close(in_pipe[1]);
-        ::close(out_pipe[0]);
-    }
-    return out;
+std::string run_cmd_args(const std::vector<const char*>& argv, int* exit_code = nullptr, int timeout_ms = 5000) {
+    return run_pipe_cmd(argv, nullptr, timeout_ms, exit_code);
+}
+
+std::string run_bluetoothctl_batch(const std::string& cmds, int timeout_ms = 5000) {
+    std::vector<const char*> argv = {"bluetoothctl", nullptr};
+    return run_pipe_cmd(argv, &cmds, timeout_ms, nullptr);
 }
 
 void read_pty_for_ms(int master_fd, int duration_ms, std::string& accum,
@@ -670,7 +832,7 @@ void Pm3Session::refresh_ble_devices_async() {
 }
 
 bool Pm3Session::start_ble_scan() {
-    if (ble_scanning_.load() || bt_pairing_.load()) return false;
+    if (ble_scanning_.load() || bt_pairing_.load() || ble_worker_busy_.load()) return false;
     if (ble_worker_.joinable()) {
         ble_worker_.join();
     }
@@ -679,16 +841,19 @@ bool Pm3Session::start_ble_scan() {
     ble_worker_busy_.store(true);
     bump_version();
     ble_worker_ = std::thread([this]() {
+        std::string bt_exe = resolve_executable_path("bluetoothctl");
+        ChildEnv env;
+        env.build({{"NO_COLOR", "1"}, {"TERM", "dumb"}});
+        char* const argv[] = {const_cast<char*>(bt_exe.c_str()), nullptr};
+
         int mfd = -1;
         pid_t pid = ::forkpty(&mfd, nullptr, nullptr, nullptr);
         if (pid == 0) {
-            ::setenv("NO_COLOR", "1", 1);
-            ::setenv("TERM", "dumb", 1);
-            const char* argv[] = {"bluetoothctl", nullptr};
-            ::execvp("bluetoothctl", const_cast<char* const*>(argv));
+            ::execve(bt_exe.c_str(), argv, env.data());
             ::_exit(127);
         }
         if (pid > 0 && mfd >= 0) {
+            ::fcntl(mfd, F_SETFD, FD_CLOEXEC);
             std::string accum;
             read_pty_for_ms(mfd, 600, accum, &stop_bt_worker_);
             if (!stop_bt_worker_.load()) {
@@ -721,7 +886,7 @@ bool Pm3Session::start_ble_scan() {
 
 bool Pm3Session::start_bt_pair(const std::string& mac, const std::string& pin) {
     if (!is_bdaddr(mac)) return false;
-    if (ble_scanning_.load() || bt_pairing_.load()) return false;
+    if (ble_scanning_.load() || bt_pairing_.load() || ble_worker_busy_.load()) return false;
     if (ble_worker_.joinable()) {
         ble_worker_.join();
     }
@@ -753,16 +918,19 @@ bool Pm3Session::start_bt_pair(const std::string& mac, const std::string& pin) {
             }
         }
 
+        std::string bt_exe = resolve_executable_path("bluetoothctl");
+        ChildEnv env;
+        env.build({{"NO_COLOR", "1"}, {"TERM", "dumb"}});
+        char* const argv[] = {const_cast<char*>(bt_exe.c_str()), nullptr};
+
         int mfd = -1;
         pid_t pid = ::forkpty(&mfd, nullptr, nullptr, nullptr);
         if (pid == 0) {
-            ::setenv("NO_COLOR", "1", 1);
-            ::setenv("TERM", "dumb", 1);
-            const char* argv[] = {"bluetoothctl", nullptr};
-            ::execvp("bluetoothctl", const_cast<char* const*>(argv));
+            ::execve(bt_exe.c_str(), argv, env.data());
             ::_exit(127);
         }
         if (pid > 0 && mfd >= 0) {
+            ::fcntl(mfd, F_SETFD, FD_CLOEXEC);
             std::string accum;
             read_pty_for_ms(mfd, 700, accum, &stop_bt_worker_);
 
@@ -1001,31 +1169,31 @@ std::string Pm3Session::find_pm3_binary() const {
     return "proxmark3";
 }
 
+bool Pm3Session::write_to_master(const char* data, size_t len) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (master_fd_ < 0) return false;
+    return write_all(master_fd_, data, len);
+}
+
 void Pm3Session::close_session(bool restore_wifi) {
-    int fd = -1;
+    abort_launch_.store(true);
     int pid = child_pid_.load();
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        fd = master_fd_;
-    }
 
     if (pid > 0 && session_alive_.load()) {
-        if (fd >= 0) {
-            const char etx = 0x03;
-            (void)::write(fd, &etx, 1);
-            const char quit_cmd[] = "\nquit\n";
-            (void)::write(fd, quit_cmd, sizeof(quit_cmd) - 1);
-        }
+        const char etx_quit[] = "\x03\nquit\n";
+        (void)write_to_master(etx_quit, sizeof(etx_quit) - 1);
         for (int i = 0; i < 10 && session_alive_.load(); ++i) {
             ::usleep(15000);
         }
-        if (session_alive_.load()) {
+        pid = child_pid_.load();
+        if (pid > 0 && session_alive_.load()) {
             ::kill(pid, SIGTERM);
             for (int i = 0; i < 7 && session_alive_.load(); ++i) {
                 ::usleep(15000);
             }
         }
-        if (session_alive_.load()) {
+        pid = child_pid_.load();
+        if (pid > 0 && session_alive_.load()) {
             ::kill(pid, SIGKILL);
         }
     }
@@ -1072,18 +1240,6 @@ bool Pm3Session::run_command_internal(const std::string& cmd, bool log_cmd) {
             worker_.join();
         }
 
-        bool wait_wifi_settle = false;
-        if (is_bt && is_wifi_enabled()) {
-            mark_wifi_paused_flag(true);
-            if (set_wifi_enabled(false)) {
-                wifi_paused_for_bt_.store(true);
-                wifi_on_cached_.store(false);
-                wait_wifi_settle = true;
-            } else {
-                mark_wifi_paused_flag(false);
-            }
-        }
-
         {
             std::lock_guard<std::mutex> lk(mu_);
             session_port_ = desired_port;
@@ -1101,54 +1257,11 @@ bool Pm3Session::run_command_internal(const std::string& cmd, bool log_cmd) {
             if (log_cmd) {
                 lines_.push_back({"$ " + cmd, LineKind::CMD});
             }
-            if (wait_wifi_settle) {
-                lines_.push_back({"[=] Pausing Wi-Fi for Classic BT...", LineKind::INFO});
-            }
             bump_version();
         }
 
-        struct winsize ws {};
-        ws.ws_row = 16;
-        ws.ws_col = 48;
-        ws.ws_xpixel = 320;
-        ws.ws_ypixel = 170;
-
-        int master_fd = -1;
-        pid_t pid = ::forkpty(&master_fd, nullptr, nullptr, &ws);
-        if (pid < 0) {
-            append_local_line("[!] forkpty failed", LineKind::ERROR);
-            last_cmd_status_.store(CmdStatus::ERR);
-            return false;
-        }
-
-        if (pid == 0) {
-            if (wait_wifi_settle) {
-                ::usleep(1200000);
-            }
-            ::setenv("TERM", "xterm-256color", 1);
-            ::setenv("COLUMNS", "48", 1);
-            ::setenv("LINES", "16", 1);
-
-            std::string bin = find_pm3_binary();
-            std::vector<const char*> args;
-            args.push_back(bin.c_str());
-            if (!desired_port.empty()) {
-                args.push_back("-p");
-                args.push_back(desired_port.c_str());
-            }
-            args.push_back("-f");
-            args.push_back(nullptr);
-
-            ::execvp(bin.c_str(), const_cast<char* const*>(args.data()));
-            std::fprintf(stderr, "[!] Failed to exec %s: %s\n", bin.c_str(), std::strerror(errno));
-            ::_exit(127);
-        }
-
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            master_fd_ = master_fd;
-        }
-        child_pid_.store(pid);
+        abort_launch_.store(false);
+        child_pid_.store(-1);
         last_exit_code_.store(0);
         last_cmd_status_.store(CmdStatus::NONE);
         prompt_ready_.store(false);
@@ -1156,11 +1269,99 @@ bool Pm3Session::run_command_internal(const std::string& cmd, bool log_cmd) {
         session_alive_.store(true);
         running_.store(true);
         bump_version();
-        worker_ = std::thread(&Pm3Session::reader_loop, this, master_fd, static_cast<int>(pid));
+
+        std::string bin = resolve_executable_path(find_pm3_binary());
+        worker_ = std::thread([this, desired_port, is_bt, bin]() {
+            if (is_bt && is_wifi_enabled()) {
+                append_local_line("[=] Pausing Wi-Fi for Classic BT...", LineKind::INFO);
+                mark_wifi_paused_flag(true);
+                if (set_wifi_enabled(false)) {
+                    wifi_paused_for_bt_.store(true);
+                    wifi_on_cached_.store(false);
+                    for (int i = 0; i < 12 && !abort_launch_.load(); ++i) {
+                        ::usleep(100000);
+                    }
+                } else {
+                    mark_wifi_paused_flag(false);
+                }
+            }
+
+            if (abort_launch_.load()) {
+                if (wifi_paused_for_bt_.exchange(false)) {
+                    (void)set_wifi_enabled(true);
+                    mark_wifi_paused_flag(false);
+                    wifi_on_cached_.store(true);
+                }
+                session_alive_.store(false);
+                running_.store(false);
+                bump_version();
+                return;
+            }
+
+            if (bin.empty()) {
+                append_local_line("[!] proxmark3 binary not found", LineKind::ERROR);
+                last_cmd_status_.store(CmdStatus::ERR);
+                session_alive_.store(false);
+                running_.store(false);
+                bump_version();
+                return;
+            }
+
+            ChildEnv env;
+            env.build({{"TERM", "xterm-256color"}, {"COLUMNS", "48"}, {"LINES", "16"}});
+
+            std::vector<std::string> arg_storage;
+            arg_storage.push_back(bin);
+            if (!desired_port.empty()) {
+                arg_storage.emplace_back("-p");
+                arg_storage.push_back(desired_port);
+            }
+            arg_storage.emplace_back("-f");
+
+            std::vector<char*> args;
+            args.reserve(arg_storage.size() + 1);
+            for (auto& a : arg_storage) {
+                args.push_back(const_cast<char*>(a.c_str()));
+            }
+            args.push_back(nullptr);
+
+            struct winsize ws {};
+            ws.ws_row = 16;
+            ws.ws_col = 48;
+            ws.ws_xpixel = 320;
+            ws.ws_ypixel = 170;
+
+            int master_fd = -1;
+            pid_t pid = ::forkpty(&master_fd, nullptr, nullptr, &ws);
+            if (pid == 0) {
+                ::execve(bin.c_str(), args.data(), env.data());
+                ::_exit(127);
+            }
+            if (pid < 0 || master_fd < 0) {
+                if (master_fd >= 0) ::close(master_fd);
+                append_local_line("[!] forkpty failed", LineKind::ERROR);
+                last_cmd_status_.store(CmdStatus::ERR);
+                session_alive_.store(false);
+                running_.store(false);
+                bump_version();
+                return;
+            }
+
+            ::fcntl(master_fd, F_SETFD, FD_CLOEXEC);
+            {
+                std::lock_guard<std::mutex> lk(mu_);
+                master_fd_ = master_fd;
+            }
+            child_pid_.store(pid);
+            if (abort_launch_.load()) {
+                ::kill(pid, SIGTERM);
+            }
+            bump_version();
+            reader_loop(master_fd, static_cast<int>(pid));
+        });
         return true;
     }
 
-    int fd = -1;
     {
         std::lock_guard<std::mutex> lk(mu_);
         active_cmd_ = cmd;
@@ -1174,7 +1375,6 @@ bool Pm3Session::run_command_internal(const std::string& cmd, bool log_cmd) {
         if (log_cmd) {
             lines_.push_back({"$ " + cmd, LineKind::CMD});
         }
-        fd = master_fd_;
         bump_version();
     }
 
@@ -1185,7 +1385,7 @@ bool Pm3Session::run_command_internal(const std::string& cmd, bool log_cmd) {
     bump_version();
 
     std::string payload = cmd + "\n";
-    if (fd < 0 || !write_all(fd, payload.data(), payload.size())) {
+    if (!write_to_master(payload.data(), payload.size())) {
         close_session();
         return run_command_internal(cmd, false);
     }
@@ -1194,14 +1394,8 @@ bool Pm3Session::run_command_internal(const std::string& cmd, bool log_cmd) {
 
 bool Pm3Session::send_enter() {
     if (!running_.load()) return false;
-    int fd = -1;
-    {
-        std::lock_guard<std::mutex> lk(mu_);
-        fd = master_fd_;
-    }
-    if (fd < 0) return false;
     const char nl = '\n';
-    return write_all(fd, &nl, 1);
+    return write_to_master(&nl, 1);
 }
 
 bool Pm3Session::request_stop() {
@@ -1209,17 +1403,11 @@ bool Pm3Session::request_stop() {
 }
 
 void Pm3Session::abort() {
+    abort_launch_.store(true);
     int pid = child_pid_.load();
     if (pid > 0 && running_.load()) {
-        int fd = -1;
-        {
-            std::lock_guard<std::mutex> lk(mu_);
-            fd = master_fd_;
-        }
-        if (fd >= 0) {
-            const char etx = 0x03;
-            (void)::write(fd, &etx, 1);
-        }
+        const char etx = 0x03;
+        (void)write_to_master(&etx, 1);
         ::kill(pid, SIGINT);
     }
 }

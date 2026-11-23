@@ -179,7 +179,7 @@ bool Framebuffer::init(bool headless) {
     }
 
     fb_path_ = detect_fb_device();
-    fb_fd_ = ::open(fb_path_.c_str(), O_RDWR);
+    fb_fd_ = ::open(fb_path_.c_str(), O_RDWR | O_CLOEXEC);
     if (fb_fd_ < 0) {
         return false;
     }

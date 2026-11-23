@@ -118,6 +118,7 @@ private:
     enum class EscState { NONE, ESC, CSI, OSC };
 
     bool run_command_internal(const std::string& cmd, bool log_cmd);
+    bool write_to_master(const char* data, size_t len);
     void bump_version() { version_.fetch_add(1, std::memory_order_release); }
     std::string find_pm3_binary() const;
     std::string config_dir() const;
@@ -169,6 +170,7 @@ private:
     std::atomic<bool> session_connected_{false};
     std::atomic<bool> prompt_ready_{false};
     std::atomic<bool> running_{false};
+    std::atomic<bool> abort_launch_{false};
     std::atomic<bool> bt_wifi_hint_needed_{false};
     std::atomic<bool> wifi_paused_for_bt_{false};
     std::atomic<bool> wifi_busy_{false};

@@ -92,6 +92,7 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, handle_sig);
     std::signal(SIGTERM, handle_sig);
+    std::signal(SIGPIPE, SIG_IGN);
 
     cpz::Framebuffer fb;
     if (!fb.init(false)) {
