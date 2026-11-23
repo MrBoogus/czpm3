@@ -6,6 +6,7 @@
 #include <cstring>
 #include <dirent.h>
 #include <fstream>
+#include <regex>
 #include <set>
 #include <sys/stat.h>
 
@@ -400,6 +401,7 @@ void AppUI::open_ports() {
 }
 
 void AppUI::open_cli() {
+    cli_pending_write_cmd_.clear();
     cli_scroll_mode_ = false;
     cli_follow_ = true;
     screen_ = Screen::CLI;
@@ -842,6 +844,33 @@ void AppUI::handle_ports(const KeyEvent& ev) {
 }
 
 void AppUI::handle_cli(const KeyEvent& ev) {
+    auto submit_cli_cmd = [&](const std::string& cmd) {
+        if (cli_history_.empty() || cli_history_.back() != cmd) {
+            cli_history_.push_back(cmd);
+            if (cli_history_.size() > 50) {
+                cli_history_.erase(cli_history_.begin());
+            }
+            session_.save_cli_history(cli_history_);
+        }
+        cli_hist_idx_ = -1;
+        cli_input_.clear();
+        cli_follow_ = true;
+        stop_requested_ = false;
+        session_.run_command(cmd);
+    };
+
+    if (!cli_pending_write_cmd_.empty()) {
+        if (ev.action == KeyAction::CHAR && (ev.ch == 'y' || ev.ch == 'Y')) {
+            std::string cmd = std::move(cli_pending_write_cmd_);
+            cli_pending_write_cmd_.clear();
+            submit_cli_cmd(cmd);
+        } else {
+            cli_pending_write_cmd_.clear();
+            show_toast("Write cancelled");
+        }
+        return;
+    }
+
     if (ev.action == KeyAction::BACK) {
         if (session_.is_running()) {
             if (!stop_requested_) {
@@ -928,19 +957,15 @@ void AppUI::handle_cli(const KeyEvent& ev) {
                 show_toast("Sent <Enter>");
             }
         } else if (!cli_input_.empty()) {
-            std::string cmd = cli_input_;
-            if (cli_history_.empty() || cli_history_.back() != cmd) {
-                cli_history_.push_back(cmd);
-                if (cli_history_.size() > 50) {
-                    cli_history_.erase(cli_history_.begin());
-                }
-                session_.save_cli_history(cli_history_);
+            static const std::regex kWriteCmdRe(
+                "(?:^|\\s)(--set|write|wrbl|wipe|restore|csetuid|cwipe|cload|clone|sim|setuid|flash|wrp)(?=$|\\s|=)",
+                std::regex::icase);
+            if (std::regex_search(cli_input_, kWriteCmdRe)) {
+                cli_pending_write_cmd_ = cli_input_;
+                show_toast("Confirm write? Y/N");
+            } else {
+                submit_cli_cmd(cli_input_);
             }
-            cli_hist_idx_ = -1;
-            cli_input_.clear();
-            cli_follow_ = true;
-            stop_requested_ = false;
-            session_.run_command(cmd);
         }
     }
 }
@@ -1513,9 +1538,15 @@ void AppUI::draw_cli() {
     }
     draw_scrollbar(313, 24, 94, total, vis, cli_scroll_);
 
-    uint16_t border = cli_scroll_mode_ ? col::BORDER : col::ACCENT;
+    uint16_t border = !cli_pending_write_cmd_.empty() ? col::AMBER
+                      : (cli_scroll_mode_ ? col::BORDER : col::ACCENT);
     fb_.fill_round_rect(6, 123, 308, 26, 4, col::SURFACE_ALT);
     fb_.draw_round_rect(6, 123, 308, 26, 4, border);
+
+    if (!cli_pending_write_cmd_.empty()) {
+        fb_.draw_text(11, 129, "Confirm write? Y/N", col::AMBER, 12, true, 298);
+        return;
+    }
 
     int max_prompt_w = 298;
     if (cli_scroll_mode_) {

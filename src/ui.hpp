@@ -150,6 +150,7 @@ private:
 
     // CLI console
     std::string cli_input_;
+    std::string cli_pending_write_cmd_;
     std::vector<std::string> cli_history_;
     int cli_hist_idx_ = -1;
     bool cli_scroll_mode_ = false;

@@ -697,9 +697,6 @@ std::vector<SerialPortInfo> Pm3Session::scan_ports() {
                     break;
                 }
             }
-            if (selected_port_.empty() && !found.empty()) {
-                selected_port_ = found.front().path;
-            }
             if (selected_port_ != prev) {
                 bump_version();
             }
