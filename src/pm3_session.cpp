@@ -691,8 +691,9 @@ bool Pm3Session::start_bt_pair(const std::string& mac, const std::string& pin) {
             accum.clear();
             send_step("info " + mac + "\n", 600);
             std::string info_lo = lower_copy(accum);
-            if (info_lo.find("not available") == std::string::npos &&
-                info_lo.find("paired: yes") != std::string::npos) {
+            bool was_paired_before = (info_lo.find("not available") == std::string::npos &&
+                                      info_lo.find("paired: yes") != std::string::npos);
+            if (was_paired_before) {
                 send_step("trust " + mac + "\n", 250);
                 paired = true;
                 status = "Paired BT: " + mac.substr(9);
@@ -710,63 +711,106 @@ bool Pm3Session::start_bt_pair(const std::string& mac, const std::string& pin) {
                 }
 
                 if (!stop_bt_worker_.load()) {
-                    send_step("trust " + mac + "\n", 300);
                     accum.clear();
                     std::string pcmd = "pair " + mac + "\n";
                     (void)write_all(mfd, pcmd.data(), pcmd.size());
 
                     bool sent_pin = false;
+                    std::string lo_mac = lower_copy(mac);
                     auto p_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
                     while (std::chrono::steady_clock::now() < p_deadline && !stop_bt_worker_.load()) {
                         read_pty_for_ms(mfd, 200, accum, &stop_bt_worker_);
-                        std::string lo = lower_copy(accum);
-                        if (lo.find("(yes/no)") != std::string::npos ||
-                            lo.find("confirm passkey") != std::string::npos ||
-                            lo.find("authorize service") != std::string::npos) {
-                            const char yes[] = "yes\n";
-                            (void)write_all(mfd, yes, sizeof(yes) - 1);
-                            accum.clear();
-                            continue;
+
+                        bool done = false;
+                        size_t pos = 0;
+                        while (pos <= accum.size()) {
+                            size_t nl = accum.find('\n', pos);
+                            std::string line = (nl == std::string::npos)
+                                                   ? accum.substr(pos)
+                                                   : accum.substr(pos, nl - pos);
+                            std::string lo = lower_copy(line);
+
+                            bool is_pin_prompt =
+                                (lo.find("enter pin") != std::string::npos ||
+                                 lo.find("pin code") != std::string::npos ||
+                                 lo.find("enter passkey") != std::string::npos ||
+                                 lo.find("request pin") != std::string::npos);
+                            if (is_pin_prompt) {
+                                if (!sent_pin && lo.find(lo_mac) != std::string::npos) {
+                                    std::string p_reply = pin + "\n";
+                                    (void)write_all(mfd, p_reply.data(), p_reply.size());
+                                    sent_pin = true;
+                                } else {
+                                    const char no[] = "no\n";
+                                    (void)write_all(mfd, no, sizeof(no) - 1);
+                                }
+                                accum.clear();
+                                break;
+                            }
+
+                            if (lo.find("(yes/no)") != std::string::npos ||
+                                lo.find("confirm passkey") != std::string::npos ||
+                                lo.find("authorize service") != std::string::npos ||
+                                lo.find("request confirmation") != std::string::npos ||
+                                lo.find("request authorization") != std::string::npos) {
+                                const char no[] = "no\n";
+                                (void)write_all(mfd, no, sizeof(no) - 1);
+                                accum.clear();
+                                break;
+                            }
+
+                            if (lo.find("pairing successful") != std::string::npos ||
+                                lo.find("alreadyexists") != std::string::npos) {
+                                paired = true;
+                                status = "Paired BT: " + mac.substr(9);
+                                done = true;
+                                break;
+                            }
+                            if (lo.find("connectionattemptfailed") != std::string::npos ||
+                                lo.find("page timeout") != std::string::npos) {
+                                paired = false;
+                                status = is_wifi_enabled()
+                                             ? "Timeout: turn Wi-Fi OFF"
+                                             : ("Pair timeout (" + mac.substr(9) + ")");
+                                done = true;
+                                break;
+                            }
+                            if (lo.find("authenticationfailed") != std::string::npos ||
+                                lo.find("authenticationrejected") != std::string::npos) {
+                                paired = false;
+                                status = "Wrong PIN (" + mac.substr(9) + ")";
+                                done = true;
+                                break;
+                            }
+                            if (lo.find("failed to pair") != std::string::npos ||
+                                lo.find("authenticationcanceled") != std::string::npos) {
+                                paired = false;
+                                status = "Pair failed (" + mac.substr(9) + ")";
+                                done = true;
+                                break;
+                            }
+
+                            if (nl == std::string::npos) break;
+                            pos = nl + 1;
                         }
-                        if (!sent_pin &&
-                            (lo.find("enter pin") != std::string::npos ||
-                             lo.find("pin code") != std::string::npos ||
-                             lo.find("enter passkey") != std::string::npos)) {
-                            std::string p_reply = pin + "\n";
-                            (void)write_all(mfd, p_reply.data(), p_reply.size());
-                            sent_pin = true;
-                            accum.clear();
-                            continue;
+                        if (done) break;
+                        size_t last_nl = accum.rfind('\n');
+                        if (last_nl != std::string::npos) {
+                            accum.erase(0, last_nl + 1);
                         }
-                        if (lo.find("pairing successful") != std::string::npos ||
-                            lo.find("alreadyexists") != std::string::npos) {
-                            paired = true;
-                            status = "Paired BT: " + mac.substr(9);
-                            break;
-                        }
-                        if (lo.find("connectionattemptfailed") != std::string::npos ||
-                            lo.find("page timeout") != std::string::npos) {
-                            paired = false;
-                            status = is_wifi_enabled()
-                                         ? "Timeout: turn Wi-Fi OFF"
-                                         : ("Pair timeout (" + mac.substr(9) + ")");
-                            break;
-                        }
-                        if (lo.find("authenticationfailed") != std::string::npos ||
-                            lo.find("authenticationrejected") != std::string::npos) {
-                            paired = false;
-                            status = "Wrong PIN (" + mac.substr(9) + ")";
-                            break;
-                        }
-                        if (lo.find("failed to pair") != std::string::npos ||
-                            lo.find("authenticationcanceled") != std::string::npos) {
-                            paired = false;
-                            status = "Pair failed (" + mac.substr(9) + ")";
-                            break;
-                        }
+                    }
+
+                    if (paired) {
+                        send_step("trust " + mac + "\n", 250);
+                    } else if (!was_paired_before) {
+                        send_step("untrust " + mac + "\n", 250);
+                        send_step("remove " + mac + "\n", 250);
                     }
                 }
             }
+            const char poff[] = "pairable off\n";
+            (void)write_all(mfd, poff, sizeof(poff) - 1);
+            read_pty_for_ms(mfd, 150, accum, &stop_bt_worker_);
             close_bt_pty(mfd, pid);
         }
 
